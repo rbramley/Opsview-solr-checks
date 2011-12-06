@@ -20,7 +20,6 @@ use XML::XPath;
 my $script             = "check_solr";
 my $script_version     = "0.1";
 my $script_description = "Extracts information from Apache Solr and performs checks on the results";
-my $script_todos	   = "TODO: Thresholds on response times";
 
 # Nagios return values
 # OK = 0
@@ -46,6 +45,8 @@ my $path = '/solr/admin/ping';
 my $metric = 'ping';
 my $handlerName = 'standard';
 
+my $warning;
+my $critical;
 
 ## process command line arguments
 
@@ -84,7 +85,7 @@ if ($opts{'o'}) {
 	if ( $opts{'o'} eq 'ping' ) {
 		# path and metric already defaulted to ping
 	} 
-	elsif ( $opts{'o'} eq 'cache' || $opts{'o'} eq 'response' || $opts{'o'} eq 'numdocs' ) {
+	elsif ( $opts{'o'} eq 'cache' || $opts{'o'} eq 'response' || $opts{'o'} eq 'numdocs' || $opts{'o'} eq 'updates' ) {
 		$metric = $opts{'o'};
 		$path = '/solr/admin/stats.jsp';
 	} 
@@ -107,6 +108,15 @@ if ( $opts{'u'} ) {
 
 my $url = "${protocol}://${hostname}:${port}${path}";
 #print "URL: $url\n";
+
+# thresholds
+if ( $opts{'w'} ) {
+	$warning = $opts{'w'};
+}
+if ( $opts{'c'} ) {
+	$critical = $opts{'c'};
+}
+
 
 # Make the GET request to Solr
 my $ua = LWP::UserAgent->new;
@@ -142,7 +152,7 @@ if ( $res->is_success ) {
 				my $numDocs = $xp->getNodeText("/solr/solr-info/CORE/entry[normalize-space(name)='searcher']/stats/stat[\@name='numDocs']")->string_value();;
 
 				# Clean up the strings
-				$numDocs =~ s/^\s+|\s+$//g;
+				$numDocs = trim($numDocs);
 	
 				$exitCode = 0;
 	  
@@ -167,8 +177,8 @@ if ( $res->is_success ) {
 					my $hitratio = $xp->getNodeText("/solr/solr-info/CACHE/entry[$n]/stats/stat[\@name='hitratio']")->string_value();
       
       				# Clean up the strings
-      				$name =~ s/^\s+|\s+$//g;
-      				$hitratio =~ s/^\s+|\s+$//g;
+      				$name = trim($name);
+      				$hitratio = trim($hitratio);
 
       				# append to performance data
       				$perfData = $perfData . "'$name hit ratio'=$hitratio\%;;;; ";
@@ -180,27 +190,59 @@ if ( $res->is_success ) {
   			$exitCode = 0;
 		}
 		elsif ( $metric eq 'response' ) {
-			# loop through the QUERYHANDLER entries
+			# process the specific named QUERYHANDLER stats
 			if ( $xp->exists("/solr/solr-info/QUERYHANDLER/entry[normalize-space(name)='$handlerName']") ) {
 				my $avgResponseTime = $xp->getNodeText("/solr/solr-info/QUERYHANDLER/entry[normalize-space(name)='$handlerName']/stats/stat[\@name='avgTimePerRequest']")->string_value();;
 				my $requests = $xp->getNodeText("/solr/solr-info/QUERYHANDLER/entry[normalize-space(name)='$handlerName']/stats/stat[\@name='requests']")->string_value();;
 				my $qps = $xp->getNodeText("/solr/solr-info/QUERYHANDLER/entry[normalize-space(name)='$handlerName']/stats/stat[\@name='avgRequestsPerSecond']")->string_value();;
 
-				# Clean up the strings
-    			$requests =~ s/^\s+|\s+$//g;
+				# Clean up the string
+    			$requests = trim($requests);
+
     			if ($requests == 0) {      
       				$retStr = $retStr . " - Query handler ${handlerName} has had no requests.";
       				$exitCode = 3;
     			} else {
-      				$avgResponseTime =~ s/^\s+|\s+$//g;
-      				$qps =~ s/^\s+|\s+$//g;
+      				$avgResponseTime = trim($avgResponseTime);
+      				$qps = trim($qps);
       
-      				# TODO: warning & critical thresholds
-      				$exitCode = 0;
+      				# threshold checks
+      				if ( $critical && $avgResponseTime >= $critical ) {
+      					$exitCode = 2;
+      				}
+      				elsif ( $warning && $avgResponseTime >= $warning ) {
+      					$exitCode = 1;
+      				} 
+      				else {
+      					$exitCode = 0;
+      				}
       
-      				# append to performance data
+					# append to output
+					$retStr = $retStr . " - ${handlerName} avgResponseTime=${avgResponseTime}";
 	  				$perfData = $perfData . "'${handlerName} avgResponseTime'=${avgResponseTime}ms;;;; '${handlerName} requests'=${requests}c;;;; '${handlerName} qps'=${qps};;;; ";
     			}
+  			}
+  			else {
+    			# exit code stays as UNKNOWN
+    			$retStr = $retStr . " - Query handler ${handlerName} not found!"
+  			}
+		}
+		elsif ( $metric eq 'updates' ) {
+			# get the UPDATEHANDLER stats
+			if ( $xp->exists("/solr/solr-info/UPDATEHANDLER/entry[normalize-space(name)='updateHandler']") ) {
+				# Stats to gather
+				my @updateStats = ('cumulative_adds', 'commits', 'optimizes', 'docsPending', 'deletesById', 'deletesByQuery');
+
+				foreach my $stat ( @updateStats ) {
+					my $value = $xp->getNodeText("/solr/solr-info/UPDATEHANDLER/entry[normalize-space(name)='updateHandler']/stats/stat[\@name='$stat']")->string_value();
+					$value = trim($value);
+					
+					# append to output
+					$retStr = $retStr . "; ${stat}=${value}";
+					$perfData = $perfData . "${stat}=${value};;;; ";
+				}
+      
+      			$exitCode = 0;
   			}
   			else {
     			# exit code stays as UNKNOWN
@@ -226,7 +268,6 @@ sub usage {
 $script $script_version
 
 $script_description
-$script_todos
 
 Usage: $script -H <hostname>
 
@@ -235,14 +276,22 @@ Options: -s     Use secure transport (https)
          -p     Solr port number (if not supplied defaults to port 8983)
          -u     URL path (defaults to /solr/admin/ping 
                 or /solr/admin/stats.jsp depending on option)
-         -o     Option: ping/cache/response/numdocs (defaults to 'ping')
+         -o     Option: ping/cache/response/numdocs/updates 
+                (defaults to 'ping')
          -n     Handler name for response statistics (defaults to 'standard')
-         -w     Warning criteria (TODO)
-         -c     Critical criteria (TODO)
+         -w     Warning criteria (Integer - used by response)
+         -c     Critical criteria (Integer - used by response)
 
 ------------------------------------------------------------------------------
 Copyright (c) 2011 Robin Bramley, Ixxus Limited.
 ------------------------------------------------------------------------------
 EOF
 
+}
+
+# trim leading & trailing spaces
+sub trim {
+	my ($arg) = @_;
+	$arg =~ s/^\s+|\s+$//g;
+	return $arg;
 }
