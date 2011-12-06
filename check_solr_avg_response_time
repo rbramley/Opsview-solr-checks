@@ -29,7 +29,7 @@ my $numArgs = $#ARGV + 1;
 
 # check arguments
 if ( $numArgs != 2 && $numArgs != 4 ) {
-  print "Usage: check_solr_cache_hit_ratio url handler [username password]\n";
+  print "Usage: check_solr_avg_response_time url handler [username password]\n";
   exit $exitCode;
 }
 
@@ -60,6 +60,7 @@ if ( $res->is_success ) {
   if ( $xp->exists("/solr/solr-info/QUERYHANDLER/entry[normalize-space(name)='$handlerName']") ) {
 	my $avgResponseTime = $xp->getNodeText("/solr/solr-info/QUERYHANDLER/entry[normalize-space(name)='$handlerName']/stats/stat[\@name='avgTimePerRequest']")->string_value();;
 	my $requests = $xp->getNodeText("/solr/solr-info/QUERYHANDLER/entry[normalize-space(name)='$handlerName']/stats/stat[\@name='requests']")->string_value();;
+	my $qps = $xp->getNodeText("/solr/solr-info/QUERYHANDLER/entry[normalize-space(name)='$handlerName']/stats/stat[\@name='avgRequestsPerSecond']")->string_value();;
 	
 	# Clean up the strings
     $requests =~ s/^\s+|\s+$//g;
@@ -68,12 +69,13 @@ if ( $res->is_success ) {
       $exitCode = 3;
     } else {
       $avgResponseTime =~ s/^\s+|\s+$//g;
+      $qps =~ s/^\s+|\s+$//g;
       
       # TODO: warning & critical thresholds
       $exitCode = 0;
       
       # append to performance data
-	  $perfData = $perfData . "'${handlerName} avgResponseTime'=${avgResponseTime}ms;;;; '${handlerName} requests'=${requests};;;; ";
+	  $perfData = $perfData . "'${handlerName} avgResponseTime'=${avgResponseTime}ms;;;; '${handlerName} requests'=${requests}c;;;; '${handlerName} qps'=${qps};;;; ";
     }
   }
   else {
